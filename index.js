@@ -1,134 +1,131 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const pool = require('./database'); // Conexão com o PostgreSQL
+const pool = require('./database');
 
 const client = new Client({
     authStrategy: new LocalAuth()
 });
 
 client.on('qr', (qr) => {
-    console.log('Escaneie o QR Code abaixo com o seu WhatsApp:');
+    console.log('📱 Escaneie o QR Code abaixo com o seu WhatsApp:');
     qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
-    console.log('✅ ZarcoBot está online e conectado ao Banco de Dados!');
+    console.log('✅ ZarcoBot Inteligente está online e conectado ao Banco!');
 });
 
-const terminais = [
-    "1️⃣ Centro", "2️⃣ Norte", "3️⃣ Sul", "4️⃣ Itaum", 
-    "5️⃣ Tupy", "6️⃣ Pirabeiraba", "7️⃣ Vila Nova", 
-    "8️⃣ Nova Brasília", "9️⃣ Guanabara", "🔟 Iririú"
-];
-
-// O estado agora é um objeto que guarda o passo atual e os dados temporários
+// A "memória" do bot para saber em qual passo o usuário está
 const estadoConversa = {};
 
 client.on('message', async (message) => {
     const texto = message.body.toLowerCase().trim();
     const numeroUsuario = message.from;
 
-    // Se o usuário não tem estado, iniciamos um
-    if (!estadoConversa[numeroUsuario]) {
-        estadoConversa[numeroUsuario] = { passo: 'inicio' };
-    }
-
-    // 1. FAST TRACK (Acesso rápido)
-    if (texto.includes('horários') && texto.includes('0100')) {
-        try {
-            const res = await pool.query(`
-                SELECT h.hora_saida 
-                FROM horarios h
-                JOIN linhas l ON h.id_linha = l.id
-                JOIN terminais t ON h.id_terminal_saida = t.id
-                WHERE l.numero = '0100' AND t.nome = 'Norte'
-                ORDER BY h.hora_saida ASC
-                LIMIT 10
-            `);
-
-            if (res.rows.length > 0) {
-                let resposta = '🚌 *Linha 0100 - Norte/Sul*\n\nPróximos horários saindo do Terminal Norte:\n';
-                res.rows.forEach(linha => {
-                    resposta += `⏰ ${linha.hora_saida.substring(0, 5)}\n`;
-                });
-                await message.reply(resposta);
-            }
-        } catch (erro) {
-            console.error('Erro no fast track:', erro);
-        }
-        estadoConversa[numeroUsuario] = { passo: 'inicio' };
-        return; 
-    }
-
-    // 2. FLUXO DE MENUS PASSO A PASSO
-    if (texto === 'oi' || texto === 'olá' || texto === 'ola' || texto === 'menu') {
-        let menuTerminais = 'Olá! Sou o *ZarcoBot* 🚌\nDe qual terminal você vai partir hoje?\n\n*Responda com o número da opção:*\n';
-        terminais.forEach(t => menuTerminais += `\n${t}`);
-        
-        await message.reply(menuTerminais);
-        
-        // Define o passo
-        estadoConversa[numeroUsuario] = { passo: 'aguardando_terminal' };
+    // Se o usuário mandar oi, menu, ou se não tiver conversa iniciada
+    if (texto === 'menu' || texto === 'oi' || texto === 'ola' || texto === 'olá') {
+        estadoConversa[numeroUsuario] = { passo: 'aguardando_linha' };
+        await message.reply('Olá! Sou o *ZarcoBot* 🚌\n\nQual o *número da linha* que você deseja consultar? (ex: 0100, 0223, 0040)');
         return;
     }
 
-    if (estadoConversa[numeroUsuario].passo === 'aguardando_terminal') {
-        const opcaoEscolhida = parseInt(texto);
+    // Se ele não mandou "oi", mas o bot está esperando ele digitar a linha
+    if (!estadoConversa[numeroUsuario] || estadoConversa[numeroUsuario].passo === 'aguardando_linha') {
+        const linhaDigitada = texto; // Presumimos que o que ele digitou é a linha
 
-        if (opcaoEscolhida >= 1 && opcaoEscolhida <= 10) {
-            const terminalEscolhido = terminais[opcaoEscolhida - 1].split(' ')[1]; 
+        try {
+            // Busca QUAIS terminais/ruas têm essa linha cadastrada
+            const resOrigens = await pool.query(`
+                SELECT DISTINCT t.id, t.nome 
+                FROM horarios h
+                JOIN terminais t ON h.id_terminal_saida = t.id
+                JOIN linhas l ON h.id_linha = l.id
+                WHERE l.numero = $1
+            `, [linhaDigitada]);
+
+            if (resOrigens.rows.length === 0) {
+                await message.reply(`Poxa, não encontrei a linha *${linhaDigitada}* no meu sistema.\n\nVerifique se o número está correto e digite novamente, ou mande *menu* para recomeçar.`);
+                return;
+            }
+
+            // Monta o menu dinâmico com as opções de Ida e Volta
+            let menuOrigens = `🚌 *Linha ${linhaDigitada}*\nDe onde você vai partir?\n\n*Responda com o número da opção:*\n`;
+            const opcoesOrigem = {}; // Guarda o ID de cada opção para usar no próximo passo
             
-            await message.reply(`Ótima escolha! Você está no *Terminal ${terminalEscolhido}*.\n\nPara qual linha você quer ir? Digite o número da rota (ex: 0100, 0041).`);
-            
-            // Avança o passo e SALVA o terminal na memória do bot
+            resOrigens.rows.forEach((origem, index) => {
+                const numOpcao = index + 1;
+                menuOrigens += `\n*${numOpcao}* - ${origem.nome}`;
+                opcoesOrigem[numOpcao] = origem.id; 
+            });
+
+            await message.reply(menuOrigens);
+
+            // Avança o passo e guarda as opções na memória
             estadoConversa[numeroUsuario] = { 
-                passo: 'aguardando_linha', 
-                terminalOrigem: terminalEscolhido 
+                passo: 'aguardando_origem', 
+                linha: linhaDigitada,
+                opcoes: opcoesOrigem 
             };
-        } else {
-            await message.reply('Opção inválida. Por favor, digite um número de *1 a 10*.');
+
+        } catch (erro) {
+            console.error('Erro ao buscar origens:', erro);
+            await message.reply('Ops, estou com problemas no banco de dados. 🔧');
         }
         return;
     }
 
-    if (estadoConversa[numeroUsuario].passo === 'aguardando_linha') {
-        const linhaDigitada = texto; // O que o usuário digitou (ex: '0041')
-        const terminalSalvo = estadoConversa[numeroUsuario].terminalOrigem; // O que ele escolheu no passo anterior
+    // Se o bot está esperando ele escolher entre Ida e Volta (1, 2, etc.)
+    if (estadoConversa[numeroUsuario].passo === 'aguardando_origem') {
+        const opcaoEscolhida = parseInt(texto);
+        const estado = estadoConversa[numeroUsuario]; // Recupera a memória
 
-        try {
-            // Consulta REAL no banco unindo a linha e o terminal
-            const res = await pool.query(`
-                SELECT h.hora_saida 
-                FROM horarios h
-                JOIN linhas l ON h.id_linha = l.id
-                JOIN terminais t ON h.id_terminal_saida = t.id
-                WHERE l.numero = $1 AND t.nome = $2
-                ORDER BY h.hora_saida ASC
-                LIMIT 10
-            `, [linhaDigitada, terminalSalvo]);
+        // Verifica se ele digitou um número válido do menu
+        if (estado.opcoes[opcaoEscolhida]) {
+            const idTerminalEscolhido = estado.opcoes[opcaoEscolhida];
+            
+            try {
+                // Pega a hora atual do seu celular/computador
+                const agora = new Date();
+                const horaAtual = agora.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' }); 
 
-            if (res.rows.length > 0) {
-                let resposta = `🚌 *Linha ${linhaDigitada} - Saindo do Terminal ${terminalSalvo}*\n\nPróximos horários cadastrados:\n`;
-                
-                res.rows.forEach(linha => {
-                    const horaFormatada = linha.hora_saida.substring(0, 5); 
-                    resposta += `⏰ ${horaFormatada}\n`;
-                });
-                
-                resposta += '\nDigite *menu* para fazer uma nova consulta.';
-                await message.reply(resposta);
-                
-                // Só reseta para o início se deu sucesso
-                estadoConversa[numeroUsuario] = { passo: 'inicio' };
-            } else {
-                await message.reply(`Poxa, não encontrei horários para a linha *${linhaDigitada}* saindo do terminal *${terminalSalvo}*.\n\nVerifique se o número está correto e digite novamente, ou digite *menu* para recomeçar.`);
-                // Não reseta o estado aqui, permite que ele tente digitar outro número de linha
+                // Busca os horários do FUTURO
+                const resHorarios = await pool.query(`
+                    SELECT h.hora_saida, t.nome as nome_terminal
+                    FROM horarios h
+                    JOIN terminais t ON h.id_terminal_saida = t.id
+                    JOIN linhas l ON h.id_linha = l.id
+                    WHERE l.numero = $1 
+                      AND t.id = $2
+                      AND h.tipo_dia = 'Dias Úteis' 
+                      AND h.hora_saida >= $3
+                    ORDER BY h.hora_saida ASC
+                    LIMIT 5
+                `, [estado.linha, idTerminalEscolhido, horaAtual]);
+
+                if (resHorarios.rows.length > 0) {
+                    const nomeTerminal = resHorarios.rows[0].nome_terminal;
+                    let resposta = `🚌 *Próximos ônibus - Linha ${estado.linha}*\n📍 Saindo de: *${nomeTerminal}*\n\n`;
+                    
+                    resHorarios.rows.forEach(linha => {
+                        resposta += `⏰ ${linha.hora_saida.substring(0, 5)}\n`; // Corta os segundos
+                    });
+                    
+                    resposta += '\nDigite *menu* para fazer uma nova consulta.';
+                    await message.reply(resposta);
+                    
+                    // Reseta a conversa
+                    estadoConversa[numeroUsuario] = { passo: 'aguardando_linha' };
+                } else {
+                    await message.reply(`A operação desta linha saindo deste ponto já encerrou por hoje.\n\nDigite *menu* para pesquisar outra linha.`);
+                    estadoConversa[numeroUsuario] = { passo: 'aguardando_linha' };
+                }
+
+            } catch (erro) {
+                console.error('Erro ao buscar horários:', erro);
+                await message.reply('Ops, deu um erro ao buscar os horários. 🔧');
             }
-
-        } catch (erro) {
-            console.error('Erro no banco de dados:', erro);
-            await message.reply('Desculpe, estou com problemas técnicos para acessar o banco de dados agora. 🔧');
-            estadoConversa[numeroUsuario] = { passo: 'inicio' };
+        } else {
+            await message.reply('Opção inválida. Por favor, digite apenas o *número* que aparece no menu acima.');
         }
         return;
     }

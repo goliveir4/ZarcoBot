@@ -28,7 +28,6 @@ INSERT INTO terminais (nome) VALUES
 ('Tupy'), 
 ('Pirabeiraba'), 
 ('Vila Nova'), 
-('Nova Brasília'), 
 ('Guanabara'), 
 ('Iririú')
 ON CONFLICT DO NOTHING;
